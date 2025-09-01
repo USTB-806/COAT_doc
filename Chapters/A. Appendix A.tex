@@ -1,0 +1,90 @@
+\section{LA组评分细则}
+
+\subsection{任务要求}
+
+\subsubsection{写在开头}
+
+\highlight{个人任务需要个人独立完成验收，创新扩展部分在答辩环节进行展示，需要在答辩中展示创新扩展的正确性。}
+
+\begin{itemize}
+    \item 关于答辩会提的问题：
+    \begin{itemize}
+        \item 主要会围绕着创新内容部分进行考察，考察原理和实现思路。
+    \end{itemize}
+    \item 关于评分与难度的非线性关系：
+    \begin{itemize}
+        \item 之所以存在这种非线性关系，主要是为了一般的同学能够拿到分数，对此感兴趣的同学可以深入。不喜欢这个方向就没必要卷计组课设了，抓紧时间学好其他专业课。
+    \end{itemize}
+    \item 关于分数分布
+    \begin{itemize}
+        \item 本课程的总分100分，难度最大的部分其实在创新扩展部分，而其他的部分都只要认真把握课程原理，即可实现，请同学们重点把握这部分知识，充分理解；
+        \item 不建议大家死磕创新扩展的实现，\highlight{更禁止通过抄袭的方式获得这一部分分数}，请大家实事求是。
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{个人任务 60分}
+
+根据给出的实验指导书完成前五个章节：
+
+\begin{itemize}
+    \item 不考虑冲突的简单五级流水划分；
+    \item 指令相关和流水线冲突；
+    \item 算术逻辑转移类指令的添加；
+    \item 访存指令的添加；
+    \item 乘除法指令的添加。
+\end{itemize}
+
+\paragraph{实验报告——个人部分 10分}
+
+\subsubsection{团队任务 40分}
+
+\paragraph{创新基础部分}
+
+异常相关指令扩展 （根据指导书的最后一章，实现异常和中断的支持）：
+
+\begin{itemize}
+    \item 第一阶段：
+    \begin{itemize}
+        \item 增加 csrrd、csrwr、csrxchg 和 ertn 指令；
+        \item 为 CPU 增加控制状态寄存器 CRMD、PRMD、ESTAT、ERA、EENTRY、SAVE0-3；
+        \item 为 CPU 增加 syscall 指令，实现系统调用异常支持。
+    \end{itemize}
+    \item 第二阶段：
+    \begin{itemize}
+        \item 增加取指地址错（ADEF）、地址非对齐（ALE）、断点（BRK）和指令不存在（INE）异常的支持；
+        \item 增加中断的支持，包括 2 个软件中断、8 个硬件中断和定时器中断；
+        \item 增加 rdcntvl.w、rdcntvh.w 和 rdcntid 指令；
+        \item 增加控制状态寄存器 ECFG、BADV、TID、TCFG、TVAL、TICLR。
+    \end{itemize}
+\end{itemize}
+
+\paragraph{创新扩展部分}
+
+给出多个选项参考，并不需要大家全部完成，如有其他自行设计的创新扩展不在本范围内也可。
+
+\begin{itemize}
+    \item AXI总线接口设计：
+    \begin{itemize}
+        \item 将CPU顶层接口修改为AXI总线接口。
+    \end{itemize}
+    \item 缓存模块设计：
+    
+    Cache是现代计算机中不可缺少的技术。
+
+    \begin{itemize}
+        \item Cache基本实现为一路直接映射Cache，二者都实现时取DataCache成绩；
+        \item Cache指令实现；
+        \item 多路组相连Cache；
+        \item Cache流水化。
+    \end{itemize}
+    \item 外设功能扩展
+    \begin{itemize}
+        \item 通过汇编语言代码对SoC上已经提供实现了的外设进行操控；
+        \item 集成串口外设，并能通过汇编语言代码操纵外设。
+    \end{itemize}
+\end{itemize}
+
+\paragraph{实验报告——团队部分 10分}
+
+
+

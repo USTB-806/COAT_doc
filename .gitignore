@@ -1,0 +1,13 @@
+*.aux
+*.fdb_*
+*.fls
+*.log
+*.out
+*.toc
+*.gz
+*.xdv
+out/**
+answer/**
+.idea/**
+**/*.bkp
+**/*.dtmp

@@ -1,0 +1,423 @@
+\section{异常和中断支持}
+
+\foreword{
+    风
+}{
+    伊夫·唐吉
+}{
+    我站在今天设想过去又幻想未来，过去和未来在今天随意交叉，因而过去和未来都刮着现在的风。
+}{
+    Figures/C10.jpg
+}
+
+\begin{center}
+    \highlight{强调：本节内容请搭配手册使用}
+\end{center}
+
+关于异常和中断的概念，在这里不进行过多的阐述，在CPU设计的角度来看，
+中断可以看成是一种特殊的异常，下文中统一使用异常来指代中断和异常。
+
+异常处理的绝大部分工作是由异常处理程序（软件）的完成的，
+但在异常处理的开始和结束阶段则是硬件需要考虑的，这正是本节中我们需要考虑的。
+
+\paragraph{异常处理的开始阶段} 首先硬件需要判断异常的触发条件，随后硬件需要自动保存异常的类型，
+触发异常的指令，地址等信息以用来给异常处理程序。此外，硬件需要保证跳转到异常处理程序的入口执行，
+并且处于高特权等级。
+
+\paragraph{异常结束阶段} 需要跳转回到发生异常的指令处重新开始执行，并且保证特权等级回到最初环境的特权等级。
+
+
+\subsection{控制状态寄存器}
+
+上面提到，异常需要进行软硬件的协同处理，所以难以避免的需要进行硬件逻辑电路和异常处理软件的信息交互。
+为了保证精确异常的实现，LoongArch 指令系统中定义了一组独立的寄存器用于这类信息的交互，
+统称为控制状态寄存器（Control Status Register，简称 CSR）。
+
+在本节内容中需要实现，设计的异常和中断的处理来说，相关的CSR有：CRMD、PRMD、ECFG、ESTAT、
+ERA、BADV、EENTRY、SAVE0$\sim$3、TID、TCFG、TVAL、TICLR。这些寄存器的详细定义请参看指令手册。
+
+\subsection{异常产生的条件判断}
+
+\subsubsection{处理器核内部判定接收到中断}
+
+根据 LoongArch 指令系统的定义，每个处理器核内部可以记录 12 个线中断。
+除去应用于多核场景下的核间中断目前暂不考虑，还包括 8 个硬中断、2 个软中断和 1 个定时器中断。
+
+硬中断可以理解为处理器核上有八个中断输入引脚，中断信号通过这八个引脚输入。
+ESTAT 控制状态寄存器 IS（Interrupt State）域的 9到2 这八位（RTL 上对应 8 个触发器）
+则直接对中断输入引脚的信号采样。
+
+软件中断顾名思义是由软件来设置的，通过 CSR 写指令对ESTAT 状态控制寄存器 IS 域的 1..0 
+这两位写 1 或写 0 就可以完成两个软件中断的置起和撤销。
+
+定时器中断的状态记录在 ESTAT 控制状态寄存器 IS 域的第 11 位。
+
+从上面描述可知，ESTAT的IS域的11，9..0这11位记录了中断的11个状态，均为高电平表示有效。
+但是处理器核中是否接受中断还需要看中断的使能情况，分为两个层次：
+
+低层次-局部中断使能，由ECFG的LIE(local interrupt enable)域的11，9..0位依次对应控制
+
+高层次-全局中断使能，通过CRMD的IE(interrupt enable)位来控制
+
+综上可以给出处理器内部判断中断信号的\texttt{has\_int}可以这样实现：
+
+\begin{lstlisting}
+    assign has_int =  ((csr_estat_is[12:0] & csr_ecfg_lie[12:0]) != 13'b0)
+    && (csr_crmd_ie == 1'b1);
+\end{lstlisting}
+
+注：在la32r中，不考虑多个中断的先后顺序，无论是接收到一个外部中断还是多个外部中断，此信号都可以被置为有效
+
+\subsubsection{核内定时器中断的产生}
+
+定时器中断经常用于操作系统的调度和计时功能的实现。该中断源来自于定时器，
+通常分为核外和核内两种实现方式。LoongArch 指令系统采用了核内实现定时器中断源的方式。
+简单来说，在每个 LoongArch32 处理器核内部实现一个 32 位的计数器，
+在开启定时功能后每个时钟周期减1，当减到 0 值即可触发一次定时器中断。
+接下来介绍其定义细节：
+\begin{itemize}
+    \item 定时器的软件配置集中在 TCFG（Timer Config）控制状态寄存器，包括它的启动使能
+    、倒计时初始值和倒计时模式。其中倒计时模式分为两种，一种是减到 0 后即停止计数，另一种是减到 0 
+    后自动装载倒计时初始值再次开始新一轮倒计时。
+    \item 定时器的时钟与 \texttt{rdcntv{l/h}.w} 指令所访问的计时器使用同一时钟，这个时钟要求频率固定，
+    我们尚不考虑处理器核的变频和关停，所以可以采用处理器核流水线的时钟。
+    \item 定时器当前的计数值仅可以通过读取 TVAL 状态寄存器近似获得，它与 \texttt{rdcntv{l/h}.w} 
+    指令读取的计时器值来自于两个截然不同的对象。
+    \item 当定时器倒计时到 0 时硬件将 ESTAT 控制状态寄存器
+     IS 域的第 11 位置 1，软件通过对 TICLR 控制寄存器的 CLR 位写 1 将 ESTAT 控制状态寄存器 
+     IS 域的第 11 位清 0。
+\end{itemize}
+
+
+\subsubsection{取指地址错异常ADEF}
+
+要求所有指令的PC都是字对齐的（地址最低两比特全为0），否则触发ADEF。
+
+检测逻辑：对取指所用的 PC 的最低两位进行判断，如果不是 \texttt{2'b00} 的话，则置起取指地址错异常标志。
+我们推荐在 pre-IF 级就进行这一判断。从严格意义上讲，出现异常的取指地址不应该用来发起取指的请求，
+因为此时这个 PC 可能已经完全不正确，所以它的访存行为也不再软件人员的预想之内，最严重时可能导致死机等错误。
+
+\subsubsection{地址非对齐异常ALE}
+
+地址非对齐仅针对load，store这类的访存指令。当lh，lhu和sh指令的地址最低位不为0时，
+或者lw，sw指令的地址最低两位不为全0时，触发ALE。
+
+检测逻辑：需对 load、store 指令的地址进行判断，当访存地址出现非对齐情况时，
+则置起地址非对齐异常标志。与前一节的设计思路一致，我们推荐在发起访存请求的EXE 级进行上述判断，
+这样可以在发现异常情况的时候停止用错误地址发起访存请求。
+
+\subsubsection{指令不存在异常INE}
+
+当取回的指令码不属于任何一条已实现的指令时，将触发INE。
+
+检测逻辑：可知指令不存在异常需要对指令译码后才得到检测结果。
+由于我们需要在译码阶段对每一条实现的指令进行解码生成控制信号，
+所以自然就可得到 ``不是任何一条实现的指令'' 的条件。
+
+\subsubsection{系统调用SYS和断点异常BRK}
+
+当执行 SYSCALL 指令时触发系统调用异常，当执行 BREAK 指令时触发断点异常。
+
+检测逻辑：译码发现是syscall 指令就置起系统调用异常标志，译码发现 break 指令就置起断点异常标志。
+
+\subsection{精确异常的实现}
+
+为了实现精确异常，我们并不需要一发生异常就马上去修改控制状态寄存器和PC。
+发生异常时仅需要考虑该如何处理那些在流水线中的指令。
+
+这里给出一种处理思路：异常发生的判断逻辑分布在各流水级，
+靠近与之相关的数据通路；发现异常后将异常信息附着在指令上沿流水线一路携带下去，
+直至写回级才真正报出异常，此时才会根据所携带的异常信息更新控制状态寄存器；
+写回指令报出异常的同时，清空所有流水级缓存的状态，并将 \texttt{nextPC} 置为异常入口地址。
+
+当然不一定在写回级报出异常，但必须保证该级之后的流水级不能产生新的异常，否则这就不满足精确异常的要求。
+
+\subsection{控制状态存储器的实现}
+
+控制寄存器需要被\texttt{csrrd}，\texttt{csrwr}，\texttt{csrxchg}这样的CSR指令访问，
+又需要和各级流水端口交互，看起来又集中又分散，下面给出一些设计的建议：
+
+\begin{itemize}
+    \item 把所有的控制状态寄存器集中到一个模块中实现；
+    \item 模块接口分为用于指令访问的接口和与处理器核内部硬件电路逻辑直接交互的控制、状态信号接口两类；
+    \item 指令访问接口包含读使能（\texttt{csr\_re}）、寄存器号（\texttt{csr\_num}）、
+    寄存器读返回值（\texttt{csr\_rvalue}）、写使能（\texttt{csr\_we}）、写掩码（\texttt{csr\_wmask}）和写数据（\texttt{csr\_wvalue}）；
+    \item 与硬件电路逻辑直接交互的接口信号视需要各自独立定义，
+    无须再统一编码，如送往预取指（pre-IF）流水级的异常处理入口地址 \texttt{ex\_entry}、
+    送往译码流水级的中断有效信号 \texttt{has\_int}、来自写回流水级的 \texttt{ertn} 指令执行的有效信号 
+    \texttt{ertn\_flush}、来自写回流水级的异常处理触发信号 \texttt{wb\_ex} 以及异常类型类型\texttt{wb\_ecode}、
+    \texttt{wb\_esubcode} 等。
+\end{itemize}
+
+下面给出一个具体的CSR端口设计：
+
+接下来给出每个域的具体分析和部分实现举例：
+
+\subsubsection{CRMD 的 PLV 域}
+
+从指令手册的定义可知 CRMD 的 PLV 域是可以通过 CSR 指令更新，而且在触发异常和 \texttt{ertn} 指令执行时也将被更新。
+
+\begin{lstlisting}
+    always @(posedge clock) begin
+        if (reset)
+            csr_crmd_plv <= 2'b0;
+            else if (wb_ex)
+            csr_crmd_plv <= 2'b0;
+        else if (ertn_flush)
+            csr_crmd_plv <= csr_prmd_pplv;
+            else if (csr_we && csr_num==`CSR_CRMD)
+            csr_crmd_plv <= csr_wmask[`CSR_CRMD_PLV]&csr_wvalue[`CSR_CRMD_PLV]
+                            | ~csr_wmask[`CSR_CRMD_PLV]&csr_crmd_plv;
+    end
+\end{lstlisting}
+
+这个代码应该是比较好理解的，
+每一个写入条件和写入的值基本上都可以与指令手册中的定义一一对应上。
+实现时，重点关注 CSR 模块的各个输入信号没有接错即可。
+
+\subsubsection{CRMD的IE域}
+
+\begin{lstlisting}
+    always @(posedge clock) begin
+        if (reset)
+            csr_crmd_ie <= 1'b0;
+        else if (wb_ex)
+            csr_crmd_ie <= 1'b0;
+        else if (ertn_flush)
+            csr_crmd_ie <= csr_prmd_pie;
+        else if (csr_we && csr_num==`CSR_CRMD)
+            csr_crmd_ie <= csr_wmask[`CSR_CRMD_PIE]&csr_wvalue[`CSR_CRMD_PIE]
+                        | ~csr_wmask[`CSR_CRMD_PIE]&csr_crmd_ie;
+    end
+\end{lstlisting}
+
+请根据手册自行理解，对比CRMD的IE和PLV域的代码，可以发现就分支条件基本一样，代码处理操作也是相似的。
+
+\subsubsection{CRMD 的 DA、PG、DATF、DATM 域}
+
+目前我们设计的处理器还没有实现 MMU 的全部功能，仅支持直接地址翻译模式，所以
+CRMD 的 DA、PG、DATF、DATM 域可以暂时置为常值。具体何值请根据手册自行判断。
+
+\subsubsection{PRMD 的 PPLV、PIE 域}
+
+\begin{lstlisting}
+    always @(posedge clock) begin
+        if (wb_ex) begin
+            csr_prmd_pplv <= csr_crmd_plv;
+            csr_prmd_pie <= csr_crmd_ie;
+        end
+    else if (csr_we && csr_num==`CSR_PRMD) begin
+        csr_prmd_pplv <= csr_wmask[`CSR_PRMD_PPLV]&csr_wvalue[`CSR_PRMD_PPLV]
+                        | ~csr_wmask[`CSR_PRMD_PPLV]&csr_prmd_pplv;
+        csr_prmd_pie <= csr_wmask[`CSR_PRMD_PIE]&csr_wvalue[`CSR_PRMD_PIE]
+                        | ~csr_wmask[`CSR_PRMD_PIE]&csr_prmd_pie;
+        end
+    end
+\end{lstlisting}
+
+\subsubsection{ECFG 的 LIE 域}
+
+请根据手册和上面示例代码自行实现
+
+\subsubsection{ESTAT 的 IS 域}
+
+ESTAT 的 IS 域中，1..0 位、9..2 位、11 位、12 位的更新来源存在区别，其依次仅被 CSR
+指令更新、仅通过采样处理器核硬件中断输入引脚更新、仅根据定时器计数器和 TICLR.CLR 域
+的写更新、仅通过采样处理器核的核间中断输入引脚更新。第 10 位没有定义，保险起见我们将
+其恒置为 0。
+
+\begin{lstlisting}
+    always @(posedge clock) begin
+        if (reset)
+            csr_estat_is[1:0] <= 2'b0;
+        else if (csr_we && csr_num==`CSR_ESTAT)
+            csr_estat_is[1:0] <= csr_wmask[`CSR_ESTAT_IS10]&csr_wvalue[`CSR_ESTAT_IS10]
+                            | ~csr_wmask[`CSR_ESTAT_IS10]&csr_estat_is[1:0];
+
+        csr_estat_is[9:2] <= hw_int_in[7:0];
+
+        csr_estat_is[10] <= 1'b0;
+
+        if (timer_cnt[31:0]==32'b0)
+            csr_estat_is[11] <= 1'b1;
+        else if (csr_we && csr_num==`CSR_TICLR && csr_wmask[`CSR_TICLR_CLR]
+                && csr_wvalue[`CSR_TICLR_CLR])
+            csr_estat_is[11] <= 1'b0;
+
+        csr_estat_is[12] <= ipi_int_in;
+
+    end
+\end{lstlisting}
+
+\subsubsection{ESTAT 的 Ecode 和 EsubCode 域}
+
+ESTAT 的 Ecode 和 EsubCode 域需要在触发异常时填入异常的类型代号。
+见手册，我们推荐采用每个异常单独一个标志信号的传递方式，
+最后在写回级编码为 Ecode 和 EsubCode 值送到 CSR 模块。
+
+\begin{lstlisting}
+    always @(posedge clock) begin
+        if (wb_ex) begin
+            csr_estat_ecode <= wb_ecode;
+            csr_estat_esubcode <= wb_esubcode;
+        end
+    end
+\end{lstlisting}
+
+\subsubsection{ERA 的 PC 域}
+
+当位于写回级指令触发异常时，需要记录到 ERA 寄存器的 PC 就是当前写回级的 PC。
+根据手册和以上示例代码自行实现
+
+\subsubsection{BADV 的 VAddr 域}
+
+BADV 的 VAddr 域和 ERA 的 PC 域的维护有相似之处，都是在写回级指令触发异常时，记录该指令的一些信息。
+
+这里需要注意一点，在支持异常处理之前，处理器流水线中在访存级和写回级是不需要保存
+ load，store 指令完整的虚地址的。但是为了BADV的VAddr域的正常维护，我们需要在流水线中进行保存。
+
+根据手册和以上示例代码自行实现
+
+\subsubsection{EENTRY 的 VA 域}
+
+根据手册和以上示例代码自行实现
+
+\subsubsection{SAVE0$\sim$3}
+
+SAVE0$\sim$3 就是提供给特权态软件临时存放数值用的，给出部分示例实现，自行补全完整
+
+\begin{lstlisting}
+    always @(posedge clock) begin
+        if (csr_we && csr_num==`CSR_SAVE0)
+            csr_save0_data <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
+                            | ~csr_wmask[`CSR_SAVE_DATA]&csr_save0_data;
+        if (csr_we && csr_num==`CSR_SAVE1)
+            csr_save1_data <= csr_wmask[`CSR_SAVE_DATA]&csr_wvalue[`CSR_SAVE_DATA]
+                            | ~csr_wmask[`CSR_SAVE_DATA]&csr_save1_data;
+    end
+\end{lstlisting}
+
+\subsubsection{TID}
+
+TID 寄存器的维护也是比较简单的，根据手册和示例自行实现
+
+\subsubsection{TCFG 的 En、Periodic 和 InitVal 域}
+
+根据手册和示例自行实现
+
+\subsubsection{TVAL 的 TimeVal 域}
+
+TVAL 的 TimeVal 域是一个软件只读域，它返回定时器计数器的值即可，所以可以将其实现
+为 wire 而非 reg。此处的设计关键点在于用作定时器的计数器 \texttt{timer\_cnt} 的实现。
+
+\begin{lstlisting}
+    reg csr_tcfg_en;
+    reg csr_tcfg_periodic;
+    reg [29:0] csr_tcfg_initval;
+    wire [31:0] tcfg_next_value;
+    wire [31:0] csr_tval;
+
+    reg [31:0] timer_cnt;
+    assign tcfg_next_value = csr_wmask  [31:0]&csr_wvalue[31:0]
+                            | ~csr_wmask[31:0]&{csr_tcfg_initval,
+                                                csr_tcfg_periodic, csr_tcfg_en};
+
+    always @(posedge clock) begin
+        if (reset)
+            timer_cnt <= 32'hffffffff;
+        else if (csr_we && csr_num==`CSR_TCFG && tcfg_next_value[`CSR_TCFG_EN])
+            timer_cnt <= {tcfg_next_value[`CSR_TCFG_INITVAL], 2'b0};
+        else if (csr_tcfg_en && timer_cnt!=32'hffffffff) begin
+            if (timer_cnt[31:0]==32'b0 && csr_tcfg_periodic)
+                timer_cnt <= {csr_tcfg_initval, 2'b0};
+            else
+                timer_cnt <= timer_cnt - 1'b1;
+        end
+    end
+
+    assign csr_tval = timer_cn[31:0];      
+\end{lstlisting}
+
+\begin{itemize}
+    \item 我们在软件对 timer 进行配置（也就是更新 TCFG 控制状态寄存器的时候）的同时发起
+    \texttt{timer\_cnt} 的更新操作。具体来说，就是当软件开启 timer 的使能时（即将 TCFG 的 En 域
+    置 1），将此时写入的 timer 配置寄存器的定时器初始值更新到 \texttt{timer\_cnt} 中；当软件关闭
+    timer 的使能时，\texttt{timer\_cnt} 不更新。因为是在软件写 TCFG 的同时更新 timer，所以要看
+    当前写入 TCFG 寄存器的值（\texttt{tcfg\_next\_value}），而不是用 TCFG 寄存器已有的值。
+    \item 当 \texttt{timer\_cnt} 减到全 0 且定时器不是周期性工作模式的情况下，代码中没有专门处理的逻
+    辑，所以 \texttt{timer\_cnt} 会继续减 1 变成 \texttt{32'hffffffff}。不过，因为此时定时器是非周期性的，所
+    以它应该停止计数，这就是为何 \texttt{timer\_cnt} 自减的使能条件除了看 \texttt{csr\_tcfg\_en} 是否为 1
+    外还会看 \texttt{tmer\_cnt}!=\texttt{32'hffffffff} 这个条件         
+\end{itemize}
+
+\subsubsection{TICLR 的 CLR 域}
+
+TICLR 的 CLR 域很特殊，它的读写属性是 ``W1''，意味着软件只有对它写 1 才会产生执行
+效果（即硬件只捕获对 TICLR 的 CLR 域写 1 这个动作），写 0 无效，同时软件读出的值永远
+是 0。所以，TICLR 的 CLR 域并不需要定义一个 reg 与之对应，我们只需要定义一个恒为 0 的
+wire 用于后面的 CSR 读出即可。
+
+\subsubsection{CSR 的读出}
+
+给出示例如：
+
+\begin{lstlisting}
+    wire [31:0] csr_prmd_rvalue = {29'b0, csr_prmd_pie, csr_prmd_pplv};
+    wire [31:0] csr_ecfg_rvalue = {19'b0, csr_ecfg_lie};
+
+    assign csr_rvalue = {32{csr_num==`CSR_CRMD}} & csr_crmd_rvalue
+                      | {32{csr_num==`CSR_PRMD}} & csr_prmd_rvalue
+\end{lstlisting}
+
+
+\subsection{相关冲突的处理}
+
+最经典的CSR写后读相关是\texttt{csrwr}或者\texttt{csrxchg}这两个指令修改一个CSR后又有\texttt{csrrd}，
+\texttt{csrwr}或者\texttt{csrxchg}指令读取同一个CSR，为了解决这种冲突，最简单有效的方法就是将所有的CSR读
+写指令访问CSR的操作都放到同一流水级进行处理，虽然会损失一些性能，但是影响并不是很大。
+
+\begin{table}[H]
+    \centering
+    \begin{adjustbox}{width=\linewidth} 
+    \small
+    \begin{tabularx}{\linewidth}{ccc}
+        \toprule
+        {\bfseries 写者} & {\bfseries 相关对象} & {\bfseries 读者} \\ 
+        \midrule
+        \multirow{2}{*}{csrwr 或 csrxchg} & CRMD.IE、ECFG.LIE、ECFG.IS[1:0]、TCFG.En、TICLR.CLR& 译码级的指令（标记中断）\\
+         & ERA、PRMD.PPLV、PRMD.PIE& ertn\\
+        \multirow{2}{*}{ertn} & CRMD.IE&译码级的指令 \\
+         &CRMD.PLV &取指的 PC \\
+        \bottomrule
+    \end{tabularx}
+\end{adjustbox}
+\end{table}
+
+我们这里处理冲突最主要的还是用阻塞，并不考虑前递。
+
+前面三种情况的的阻塞仍是直截了当，只需要判断EXE，MEM，WB级的时候有没有这几种情况的写相关性的写者
+，如果有就直接阻塞（阻塞在译码级）。
+
+第四种情况，在流水线中最早只能在译码的时候能知道写者和相关对象，
+但是这个时候取值级已经取出来一个指令了，现在单靠阻塞是不能解决问题了，
+这里给出一种特殊的处理方法：\texttt{ertn} 指令直到写回级才修改 CRMD，与
+此同时清空流水线并更新取指 PC。这也就是前面提到的 \texttt{ertn\_flush} 信号的由来。
+
+\subsection{实验要求}
+
+\begin{itemize}
+    \item 为 CPU 增加 csrrd、csrwr、csrxchg 和 ertn 指令
+    \item 为 CPU 增加控制状态寄存器 CRMD、PRMD、ESTAT、ERA、EENTRY、SAVE0$\sim$3。
+    \item 为 CPU 增加 syscall 指令，实现系统调用异常支持。
+    \item 运行对应的 func，要求成功通过仿真和上板验证。
+\end{itemize}
+
+\begin{itemize}
+    \item 为CPU 增加取指地址错（ADEF）、地址非对齐（ALE）、断点（BRK）和指令不存在（INE）
+    异常的支持。
+    \item 为 CPU 增加中断的支持，包括 2 个软件中断、8 个硬件中断和定时器中断。
+    \item 为 CPU 增加 rdcntvl.w、rdcntvh.w 和 rdcntid 指令。
+    \item 为 CPU 增加控制状态寄存器 ECFG、BADV、TID、TCFG、TVAL、TICLR。
+    \item 运行对应的func，要求成功通过仿真和上板验证。
+\end{itemize}
+

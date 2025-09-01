@@ -1,0 +1,45 @@
+\section{算术逻辑转移类指令的添加}
+
+\foreword{
+    僧侣步行到阿索斯山修道院
+}{
+    赫尔曼·科洛迪
+}{
+    路途中的一切，有些与我擦肩而过从此天各一方，有些便永久驻进我的心魂，雕琢我，塑造我，锤炼我，融入我而成为我。
+}{
+    Figures/C9.png
+}
+
+添加指令的设计过程：
+
+\begin{itemize}
+    \item 认真阅读指令系统规范，明确待实现指令的功能定义。
+    \item 根据指令的功能定义考虑数据通路的设计调整，能复用的尽量复用，该新增的就新增。
+    \item 根据调整后的数据通路，梳理所有指令（包括原有的指令和新增的指令）对应的控制信号。
+\end{itemize}
+
+需要添加的指令为
+
+\texttt{slti},
+\texttt{sltui},
+\texttt{andi},
+\texttt{ori},
+\texttt{xori},
+\texttt{sll.w},
+\texttt{srl.w},
+\texttt{sra.w},
+\texttt{pcaddu12i},
+\texttt{blt},
+\texttt{bge},
+\texttt{bltu},
+\texttt{bgeu}.
+
+通过比较已经完成的20条指令，不难发现，这些指令在各个阶段均可以复用原本已经实现的指令的数据通路，
+然后对流水线上的所需使用的控制信号进行调整，增加部分信号即可，不在此进行过多的描述。
+
+\subsection{实验要求}
+
+\begin{itemize}
+    \item 添加算术逻辑运算类指令slti、sltui、andi、ori、xori、sll、srl、sra、pcaddu12i。运行对应的func，要求成功通过仿真和上板验证.
+    \item 添加转移指令blt、bge、bltu、bgeu,运行对应的func，要求成功通过仿真和上板验证。
+\end{itemize}
